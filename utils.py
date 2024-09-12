@@ -384,7 +384,7 @@ class TransformerClassifier(nn.Module):
         src = self.pos_encoder(src)
 
         # Transformer Encoder (使用 padding mask 来忽略填充的部分)
-        transformer_out = self.transformer_encoder(src, key_padding_mask=key_padding_mask)
+        transformer_out = self.transformer_encoder(src, src_key_padding_mask=key_padding_mask)
 
         # Average pooling over the sequence dimension, ignoring padding
         if key_padding_mask is not None:
@@ -392,11 +392,7 @@ class TransformerClassifier(nn.Module):
             transformer_out = transformer_out * mask  # Mask the padded positions
             sum_out = transformer_out.sum(dim=1)  # Sum over the sequence length
 
-            # avg_out = sum_out / mask.sum(dim=1).clamp(min=1)  # Divide by the actual sequence lengths
-
-            # Avoid division by zero
-            num_elements = mask.sum(dim=1).clamp(min=1)  # (batch_size)
-            avg_out = sum_out / num_elements.unsqueeze(-1)  # (batch_size, model_dim)
+            avg_out = sum_out / mask.sum(dim=1).clamp(min=1)  # Divide by the actual sequence lengths
         else:
             avg_out = transformer_out.mean(dim=1)  # Average pooling over sequence length
 
