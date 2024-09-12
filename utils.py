@@ -609,7 +609,9 @@ class TSTransformer:
                              num_epochs=self.num_epochs,
                              device=device)
 
-        return self.predict(torch.tensor(X_test, dtype=torch.float32)), metrics
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+
+        return self.predict(X_test_tensor), metrics
 
     def __call__(self, *args, **kwargs):
         return self.main(*args, **kwargs)
