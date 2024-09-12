@@ -1,5 +1,6 @@
 import os
 import math
+import pickle
 import collections
 import torch
 import pandas as pd
@@ -313,15 +314,27 @@ class MLP:
 
 
 class TimeSeriesDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = [torch.tensor(seq, dtype=torch.float32) for seq in X]
-        self.y = torch.tensor(y, dtype=torch.long)
+    def __init__(self, X, y, mask=None):
+
+        if type(X) == torch.Tensor:
+            self.X = [seq.clone().detach().float() for seq in X]
+        else:
+            self.X = [torch.tensor(seq, dtype=torch.float32) for seq in X]
+
+        if type(y) == torch.Tensor:
+            self.y = y.clone().detach().long()
+        else:
+            self.y = torch.tensor(y, dtype=torch.long)
+
+        self.mask = mask
 
     def __len__(self):
         return len(self.X)
 
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        if self.mask is None:
+            return self.X[idx], self.y[idx]
+        return self.X[idx], self.y[idx], self.mask[idx]
 
 
 class PositionalEncoding(nn.Module):
@@ -399,7 +412,8 @@ class TSTransformer:
                  hidden_dim,
                  num_classes,
                  num_epochs,
-                 batch_size):
+                 batch_size,
+                 is_fixed=True):
         self.input_dim = input_dim
         self.model_dim = model_dim
         self.nhead = nhead
@@ -412,48 +426,22 @@ class TSTransformer:
         self.loss = nn.CrossEntropyLoss(reduction='none') # 损失函数
         self.optimizer = None  # 优化器
         self.net = None  # 神经网络
+        self.is_fixed = is_fixed  # 是否定长序列
 
     @staticmethod
-    def collate_fn(batch):
-        """对变长序列进行 padding"""
-        X_batch, y_batch = zip(*batch)
-
-        X_batch_padded = pad_sequence(X_batch, batch_first=True, padding_value=0.0)
-        y_batch_tensor = torch.stack(y_batch)
-
-        lengths = torch.tensor([len(x) for x in X_batch])
-        src_key_padding_mask = torch.arange(X_batch_padded.size(1)) \
-            .expand(len(X_batch), X_batch_padded.size(1)) >= lengths.unsqueeze(1)
-
-        return X_batch_padded, y_batch_tensor, src_key_padding_mask
-
-    @staticmethod
-    def create_dataset(X_train, y_train, X_test, y_test, batch_size):
-        train_dataset = TimeSeriesDataset(X_train, y_train)
-        test_dataset = TimeSeriesDataset(X_test, y_test)
-
-        # 判断时间序列是不是定长序列，如果不是定长序列，添加 padding
-        is_fixed = True
-        first_len = X_train.shape[1]
-        for X in X_train[1:]:
-            if(X.shape[0] != first_len):
-                is_fixed = False
-                break
-
-        print(f'Fixed length: {is_fixed}')
-        collate_fn = None if is_fixed else collate_fn
+    def create_dataset(X_train, y_train, X_test, y_test, X_mask, y_mask, batch_size):
+        train_dataset = TimeSeriesDataset(X_train, y_train, X_mask)
+        test_dataset = TimeSeriesDataset(X_test, y_test, y_mask)
 
         # 用 DataLoader 加载数据
         train_iter = DataLoader(train_dataset,
                                 batch_size=batch_size,
-                                shuffle=True,
-                                collate_fn=collate_fn)
+                                shuffle=True)
         test_iter = DataLoader(test_dataset,
                                batch_size=batch_size,
-                               shuffle=True,
-                               collate_fn=collate_fn)
+                               shuffle=True)
 
-        return train_iter, test_iter, is_fixed
+        return train_iter, test_iter
 
     @staticmethod
     def create_model(input_dim, model_dim, nhead, num_layers, hidden_dim, num_classes, device):
@@ -585,23 +573,24 @@ class TSTransformer:
         net.load_state_dict(torch.load(model_path, weights_only=True))
         return net
 
-    def main(self, X_train, y_train, X_test, y_test):
+    def main(self, X_train, y_train, X_test, y_test, X_mask=None, y_mask=None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.input_dim = X_train.shape[2] if self.input_dim is None else None
 
-        train_iter, test_iter, self.is_fixed = self.create_dataset(X_train,
+        train_iter, test_iter = self.create_dataset(X_train,
                                                     y_train,
                                                     X_test,
                                                     y_test,
+                                                    X_mask,
+                                                    y_mask,
                                                     self.batch_size)
         
         self.net, self.optimizer = self.create_model(input_dim=self.input_dim,
-                                     model_dim=self.model_dim,
-                                     nhead=self.nhead,
-                                     num_layers=self.num_layers,
-                                     hidden_dim=self.hidden_dim,
-                                     num_classes=self.num_classes,
-                                     device=device)
+                                                     model_dim=self.model_dim,
+                                                     nhead=self.nhead,
+                                                     num_layers=self.num_layers,
+                                                     hidden_dim=self.hidden_dim,
+                                                     num_classes=self.num_classes,
+                                                     device=device)
 
         # 训练
         metrics = self.train(train_iter=train_iter,
@@ -609,7 +598,10 @@ class TSTransformer:
                              num_epochs=self.num_epochs,
                              device=device)
 
-        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+        if type(X_test) == torch.Tensor:
+            X_test_tensor = X_test.clone().detach().float().to(device)
+        else:
+            X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
 
         return self.predict(X_test_tensor), metrics
 
