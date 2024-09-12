@@ -378,20 +378,25 @@ class TransformerClassifier(nn.Module):
             nn.Linear(hidden_dim, num_classes)
         )
 
-    def forward(self, src, src_key_padding_mask=None, need_mlp=True):
+    def forward(self, src, key_padding_mask=None, need_mlp=True):
         # 输入嵌入和位置编码
         src = self.embedding(src) * math.sqrt(src.size(-1))
         src = self.pos_encoder(src)
 
         # Transformer Encoder (使用 padding mask 来忽略填充的部分)
-        transformer_out = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
+        transformer_out = self.transformer_encoder(src, key_padding_mask=key_padding_mask)
 
         # Average pooling over the sequence dimension, ignoring padding
-        if src_key_padding_mask is not None:
-            mask = (~src_key_padding_mask).float().unsqueeze(-1)  # (batch_size, sequence_length, 1)
+        if key_padding_mask is not None:
+            mask = (~key_padding_mask).float().unsqueeze(-1)  # (batch_size, sequence_length, 1)
             transformer_out = transformer_out * mask  # Mask the padded positions
             sum_out = transformer_out.sum(dim=1)  # Sum over the sequence length
-            avg_out = sum_out / mask.sum(dim=1).clamp(min=1)  # Divide by the actual sequence lengths
+
+            # avg_out = sum_out / mask.sum(dim=1).clamp(min=1)  # Divide by the actual sequence lengths
+
+            # Avoid division by zero
+            num_elements = mask.sum(dim=1).clamp(min=1)  # (batch_size)
+            avg_out = sum_out / num_elements.unsqueeze(-1)  # (batch_size, model_dim)
         else:
             avg_out = transformer_out.mean(dim=1)  # Average pooling over sequence length
 
@@ -477,15 +482,15 @@ class TSTransformer:
                     X_batch, y_batch = data
                     X_batch = X_batch.to(device)
                     y = y_batch.to(device)
-                    src_key_padding_mask = None
+                    key_padding_mask = None
                 else:
-                    X_batch, y_batch, src_key_padding_mask = data
+                    X_batch, y_batch, key_padding_mask = data
                     X_batch = X_batch.to(device)
                     y = y_batch.to(device)
-                    src_key_padding_mask = src_key_padding_mask.to(device)
+                    key_padding_mask = key_padding_mask.to(device)
 
                 # 计算梯度并更新参数
-                y_hat = self.net(X_batch, src_key_padding_mask=src_key_padding_mask)
+                y_hat = self.net(X_batch, key_padding_mask=key_padding_mask)
                 metric.add(accuracy(y_hat, y), y.numel())
 
         return metric[0] / metric[1]
@@ -506,15 +511,15 @@ class TSTransformer:
                 X_batch, y_batch = data
                 X_batch = X_batch.to(device)
                 y = y_batch.to(device)
-                src_key_padding_mask = None
+                key_padding_mask = None
             else:
-                X_batch, y_batch, src_key_padding_mask = data
+                X_batch, y_batch, key_padding_mask = data
                 X_batch = X_batch.to(device)
                 y = y_batch.to(device)
-                src_key_padding_mask = src_key_padding_mask.to(device)
+                key_padding_mask = key_padding_mask.to(device)
 
             # 计算梯度并更新参数
-            y_hat = self.net(X_batch, src_key_padding_mask=src_key_padding_mask)
+            y_hat = self.net(X_batch, key_padding_mask=key_padding_mask)
             l = self.loss(y_hat, y)
 
             # 使用 PyTorch 内置的优化器和损失函数
@@ -560,7 +565,7 @@ class TSTransformer:
         """保存模型权重"""
         torch.save(self.net.state_dict(), model_path)
 
-    def load_model(self, model_path):
+    def load_model(self, model_path, device):
         net = TransformerClassifier(input_dim=self.input_dim,
                                     model_dim=self.model_dim,
                                     nhead=self.nhead,
@@ -570,8 +575,8 @@ class TSTransformer:
                                     num_epochs=self.num_epochs,
                                     batch_size=self.batch_size)
 
-        net.load_state_dict(torch.load(model_path, weights_only=True))
-        return net
+        net.load_state_dict(torch.load(model_path))
+        return net.to(device)
 
     def main(self, X_train, y_train, X_test, y_test, X_mask=None, y_mask=None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
