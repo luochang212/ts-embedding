@@ -98,17 +98,6 @@ def accuracy(y_hat, y):
     return float(cmp.type(y.dtype).sum())
 
 
-def evaluate_accuracy(net, data_iter):
-    """计算在指定数据集上模型的精度"""
-    if isinstance(net, torch.nn.Module):
-        net.eval()  # 将模型设置为评估模式
-    metric = Accumulator(2)  # 正确预测数、预测总数
-    with torch.no_grad():
-        for X, y in data_iter:
-            metric.add(accuracy(net(X), y), y.numel())
-    return metric[0] / metric[1]
-
-
 class Animator:
     """在动画中绘制数据"""
     def __init__(self, xlabel=None, ylabel=None, legend=None, xlim=None,
@@ -192,38 +181,32 @@ class MLP:
         self.label_col_name = None
         self.net = None
 
-    @staticmethod
-    def series2tensor(s: pd.Series, dtype):
-        return torch.tensor(s.tolist(), dtype=dtype)
-
     def split_dateset(self, df, test_size=0.2, random_state=42):
         if self.embd_col_name is None or self.label_col_name is None:
             raise Exception('`embd_col_name` or `label_col_name` is None.')
 
-        X, y = df[self.embd_col_name], df[self.label_col_name]
+        X, y = df[self.embd_col_name].tolist(), df[self.label_col_name].tolist()
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
 
-        X_train = self.series2tensor(X_train, dtype=torch.float32)
-        X_test = self.series2tensor(X_test, dtype=torch.float32)
-        y_train = self.series2tensor(y_train, dtype=torch.long)
-        y_test = self.series2tensor(y_test, dtype=torch.long)
+        X_train = torch.tensor(X_train, dtype=torch.float32)
+        X_test = torch.tensor(X_test, dtype=torch.float32)
+        y_train = torch.tensor(y_train, dtype=torch.long)
+        y_test = torch.tensor(y_test, dtype=torch.long)
 
         train_dataset = TensorDataset(X_train, y_train)
         test_dataset = TensorDataset(X_test, y_test)
 
         train_iter = DataLoader(train_dataset,
                                 self.batch_size,
-                                shuffle=True,
-                                num_workers=4)
+                                shuffle=True)
         test_iter = DataLoader(test_dataset,
                                self.batch_size,
-                               shuffle=True,
-                               num_workers=4)
+                               shuffle=True)
 
-        X_tensor = self.series2tensor(X, dtype=torch.float32)
+        X_tensor = torch.tensor(X, dtype=torch.float32)
 
-        return X_tensor, y, train_iter, test_iter
+        return X_tensor, train_iter, test_iter
 
     def init_model(self):
         net = nn.Sequential(nn.Linear(self.input_channel, self.hidden_num_1),
@@ -235,7 +218,7 @@ class MLP:
                             nn.Softmax(dim=1))
 
         def init_weights(m):
-            if type(m) == nn.Linear:
+            if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.01)
         net.apply(init_weights)
 
@@ -243,6 +226,16 @@ class MLP:
         optimizer = torch.optim.Adam(net.parameters())
 
         return net, loss, optimizer
+
+    def evaluate_accuracy(self, data_iter):
+        """计算在指定数据集上模型的精度"""
+        if isinstance(self.net, torch.nn.Module):
+            self.net.eval()  # 将模型设置为评估模式
+        metric = Accumulator(2)  # 正确预测数、预测总数
+        with torch.no_grad():
+            for X, y in data_iter:
+                metric.add(accuracy(self.net(X), y), y.numel())
+        return metric[0] / metric[1]
 
     def train_epoch(self, train_iter, loss, updater):
 
@@ -279,13 +272,15 @@ class MLP:
             'test_acc': test_acc
         }
 
-    def predict(self, X, net):
-        pred_list = []
+    def predict(self, X):
+        if isinstance(self.net, torch.nn.Module):
+            self.net.eval()  # 将模型设置为评估模式
 
+        pred_list = []
         for i in range(0, len(X), self.batch_size):
             X_batch = X[i:i+self.batch_size]
             with torch.no_grad():
-                output = net(X_batch).argmax(axis=1)
+                output = self.net(X_batch).argmax(axis=1)
             pred_list += output.tolist()
 
         return pred_list
@@ -300,14 +295,14 @@ class MLP:
         net, loss, optimizer = self.init_model()
         self.net = net
 
-        X_tensor, _, train_iter, test_iter = self.split_dateset(df, test_size=0.2)
+        X_tensor, train_iter, test_iter = self.split_dateset(df, test_size=0.2)
         metrics = self.train(train_iter=train_iter,
                              test_iter=test_iter,
                              loss=loss,
                              num_epochs=self.num_epochs,
                              updater=optimizer)
 
-        return self.predict(X_tensor, self.net), metrics
+        return self.predict(X_tensor), metrics
 
     def __call__(self, *args, **kwargs):
         return self.main(*args, **kwargs)
@@ -340,7 +335,7 @@ class TimeSeriesDataset(Dataset):
 class PositionalEncoding(nn.Module):
     """位置编码"""
 
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model, max_len=200):
         super().__init__()
         self.max_len = max_len
         position = torch.arange(max_len).unsqueeze(1)
@@ -663,3 +658,10 @@ class Convert:
         with open(self.file_path, 'rb') as f:
             item_list = pickle.load(f)
         return item_list
+
+
+def try_gpu(i=0):
+    """如果存在，则返回gpu(i)，否则返回cpu()"""
+    if torch.cuda.device_count() >= i + 1:
+        return torch.device(f'cuda:{i}')
+    return torch.device('cpu')
